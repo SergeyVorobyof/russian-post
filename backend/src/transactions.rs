@@ -20,15 +20,11 @@ extern crate serde;
 
 use serde::{Deserialize, Serialize, Deserializer, Serializer};
 
-use chrono::{DateTime, Utc};
 
 use exonum::blockchain::{ExecutionError, ExecutionResult, Transaction};
 use exonum::crypto::{CryptoHash, PublicKey, Hash};
 use exonum::messages::Message;
 use exonum::storage::Fork;
-use exonum::storage::StorageValue;
-use exonum::messages::RawMessage;
-use exonum::storage::Snapshot;
 use exonum_time::schema::TimeSchema;
 
 use POST_SERVICE_ID;
@@ -65,6 +61,11 @@ pub enum Error {
     #[fail(display = "Time is up")]
     Timeisup = 4,
 
+    #[fail(display = "Pubkey doesn`t belong to inspector")]
+    NotInspector = 5,
+
+    #[fail(display = "Pubkey doesn`t belong to issuer")]
+    NotIssuer = 6,
 }
 
 impl From<Error> for ExecutionError {
@@ -94,10 +95,11 @@ transactions! {
             seed:    u64,
         }
 
-        /// Create wallet with the given `name`.
+        /// Create wallet with the given `name`. 1 - inspector, 0 - user, 2 - issuer
         struct CreateWallet {
             pub_key: &PublicKey,
             name:    &str,
+            user_type: u64,
         }
 
         /// Prepare tokens for stamping 
@@ -137,7 +139,9 @@ impl Transaction for Issue {
             .get();
         let mut schema = CurrencySchema :: new(fork);
         let pub_key = self.pub_key();
-
+        if !schema.issuers().contains(self.issuer_key()) {
+        	Err(Error::NotIssuer)?
+        }
         if let Some(wallet) = schema.wallet(pub_key) {
             let amount = self.amount();
             schema.increase_wallet_balance(wallet, amount, &self.hash(), 0);
@@ -198,7 +202,6 @@ impl Transaction for CreateWallet {
         let mut schema = CurrencySchema::new(fork);
         let pub_key = self.pub_key();
         let hash = self.hash();
-
         if schema.wallet(pub_key).is_none(){
             let name = self.name();
             let freezed_balance = 0;
@@ -206,7 +209,8 @@ impl Transaction for CreateWallet {
 
             let entry = TimestampEntry::new(&self.hash(), time.unwrap());
             schema.add_timestamp(entry);
-
+            schema.add_inspector(pub_key, self.user_type());
+            schema.add_issuer(pub_key, self.user_type());
             Ok(())
         } else {
             Err(Error::WalletAlreadyExists)?
@@ -251,6 +255,9 @@ impl Transaction for MailAcceptance {
         let sender_key = self.sender_key();
         let accept = self.accept();
         let hash = self.hash();
+        if !schema.inspectors().contains(self.pub_key()) {
+        	Err(Error::NotInspector)?
+        }
         let sender = schema.wallet(sender_key).ok_or(Error :: SenderNotFound)?;
         if accept {
             let freezed_balance = 0;
@@ -278,9 +285,11 @@ impl Transaction for Cancellation {
             .get()
             .unwrap();
         let mut schema = CurrencySchema :: new(fork);
-        let sender_key = self.sender();
         let tx_hash = self.tx_hash();
         let hash = self.hash();
+        if !schema.inspectors().contains(self.pub_key()) {
+        	Err(Error::NotInspector)?
+        }
         let tx_time = schema.timestamps().get(&tx_hash).unwrap();
         if time.timestamp() - tx_time < n {
             let raw_tx = match schema.transactions().get(&tx_hash) {
